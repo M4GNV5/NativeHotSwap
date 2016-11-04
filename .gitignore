@@ -1,0 +1,3 @@
+# ignore local test files
+/test.c
+/test.o
