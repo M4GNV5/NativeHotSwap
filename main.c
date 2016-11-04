@@ -181,7 +181,7 @@ static void compareHandler(functioninfo_t *func, FILE *fd)
 			{
 				size_t size = (func->size & ~(PAGE_SIZE - 1)) + PAGE_SIZE;
 				uint8_t *ptr = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
-									MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+									MAP_32BIT | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 				assert(ptr != NULL);
 
 				fread(ptr, 1, size, fd);
