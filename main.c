@@ -56,15 +56,26 @@ static void patchFunction(uint8_t *func, uint8_t *newFunc)
 }
 
 //fd must be at the start of the section 'rel' is in
-static void retrieveFunction(ElfN_Shdr *sec, ElfN_Sym *sym, FILE *fd,
+static void retrieveFunction(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
 	char *names, void (*handler)(functioninfo_t *, FILE *))
 {
 	MHASH td;
 	td = mhash_init(MHASH_MD5);
 	assert(td != MHASH_FAILED);
 
-	long pos = ftell(fd);
-	fseek(fd, sec->sh_offset + sym->st_value, SEEK_SET);
+	long oldPos = ftell(fd);
+	long codePos;
+
+	{
+		fseek(fd, shOffset + sym->st_shndx * sizeof(ElfN_Shdr), SEEK_SET);
+
+		ElfN_Shdr codeSec;
+		fread(&codeSec, 1, sizeof(ElfN_Shdr), fd);
+
+		codePos = sym->st_value - codeSec.sh_addr + codeSec.sh_offset;
+	}
+
+	fseek(fd, codePos, SEEK_SET);
 
 	char buff[128];
 	uint32_t size = sym->st_size;
@@ -87,10 +98,10 @@ static void retrieveFunction(ElfN_Shdr *sec, ElfN_Sym *sym, FILE *fd,
 	info.size = sym->st_size;
 	info.next = NULL;
 
-	fseek(fd, sec->sh_offset + sym->st_value, SEEK_SET);
+	fseek(fd, codePos, SEEK_SET);
 	handler(&info, fd);
 
-	fseek(fd, pos, SEEK_SET);
+	fseek(fd, oldPos, SEEK_SET);
 }
 
 static void retrieveFunctions(char *file, void (*handler)(functioninfo_t *, FILE *))
@@ -132,16 +143,16 @@ static void retrieveFunctions(char *file, void (*handler)(functioninfo_t *, FILE
 				fseek(fd, section.sh_offset, SEEK_SET);
 			}
 
-			uint16_t count = section.sh_size;
+			uint16_t count = section.sh_size / sizeof(ElfN_Sym);
 			while(count > 0)
 			{
 				ElfN_Sym sym;
 				fread(&sym, 1, sizeof(ElfN_Sym), fd);
 
-				if(sym.st_name == 0)
+				if(sym.st_name == 0 || sym.st_size == 0)
 					; //ignore
 				else if(ELFN_ST_TYPE(sym.st_info) == STT_FUNC)
-					retrieveFunction(&section, &sym, fd, names, handler);
+					retrieveFunction(shOffset, &sym, fd, names, handler);
 				//TODO inplement STT_OBJECT
 
 				count--;
