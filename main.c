@@ -11,11 +11,13 @@
 
 #include <mhash.h>
 
+//TODO auto determine these
 #define ElfN_Ehdr Elf64_Ehdr
 #define ElfN_Shdr Elf64_Shdr
 #define ElfN_Sym Elf64_Sym
 #define ElfN_Rel Elf64_Rel
 #define ElfN_Rela Elf64_Rela
+#define ELFN_ST_TYPE(val) ELF64_ST_TYPE(val)
 
 //TODO use getpagesize() ?
 #define PAGE_SIZE 4096
@@ -49,7 +51,7 @@ static void patchFunction(uint8_t *func, uint8_t *newFunc)
 		patchedPages[(uintptr_t)aligned / 4096] = true;
 	}
 
-	func[0] = 0xE8; //call
+	func[0] = 0xE9; //jmp
 	*(uint32_t *)(func + 1) = newFunc - func - 5;
 }
 
@@ -79,9 +81,6 @@ static void retrieveFunction(ElfN_Shdr *sec, ElfN_Sym *sym, FILE *fd,
 	}
 
 	functioninfo_t info;
-
-	printf("name = %s\n", names + sym->st_name);
-
 	mhash_deinit(td, info.digest);
 	info.name = names + sym->st_name;
 	info.address = (void *)sym->st_value;
@@ -141,7 +140,7 @@ static void retrieveFunctions(char *file, void (*handler)(functioninfo_t *, FILE
 
 				if(sym.st_name == 0)
 					; //ignore
-				else if(ELF64_ST_TYPE(sym.st_info) == STT_FUNC)
+				else if(ELFN_ST_TYPE(sym.st_info) == STT_FUNC)
 					retrieveFunction(&section, &sym, fd, names, handler);
 				//TODO inplement STT_OBJECT
 
@@ -173,14 +172,10 @@ static void compareHandler(functioninfo_t *func, FILE *fd)
 	{
 		if(strcmp(curr->name, func->name) == 0)
 		{
-			if(memcmp(curr->digest, func->digest, 16) == 0)
-			{
-				return;
-			}
-			else
+			if(memcmp(curr->digest, func->digest, 16) != 0)
 			{
 				size_t size = (func->size & ~(PAGE_SIZE - 1)) + PAGE_SIZE;
-				uint8_t *ptr = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
+				uint8_t *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC,
 									MAP_32BIT | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 				assert(ptr != NULL);
 
@@ -192,6 +187,8 @@ static void compareHandler(functioninfo_t *func, FILE *fd)
 				patchFunction(dlsym(NULL, curr->name), ptr);
 				memcpy(curr->digest, func->digest, 16);
 			}
+
+			return;
 		}
 
 		curr = curr->next;
