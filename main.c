@@ -59,7 +59,6 @@ static void patchFunction(uint8_t *func, uint8_t *newFunc)
 	*(uint32_t *)(func + 1) = newFunc - func - 5;
 }
 
-//fd must be at the start of the section 'rel' is in
 static void retrieveFunction(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
 	char *names, void (*handler)(functioninfo_t *, FILE *))
 {
@@ -74,7 +73,7 @@ static void retrieveFunction(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
 		fseek(fd, shOffset + sym->st_shndx * sizeof(ElfN_Shdr), SEEK_SET);
 
 		ElfN_Shdr codeSec;
-		fread(&codeSec, 1, sizeof(ElfN_Shdr), fd);
+		assert(fread(&codeSec, 1, sizeof(ElfN_Shdr), fd) == sizeof(ElfN_Shdr));
 
 		codePos = sym->st_value - codeSec.sh_addr + codeSec.sh_offset;
 	}
@@ -118,7 +117,7 @@ static void retrieveFunctions(char *file, void (*handler)(functioninfo_t *, FILE
 
 	{
 		ElfN_Ehdr header;
-		fread(&header, 1, sizeof(ElfN_Ehdr), fd);
+		assert(fread(&header, 1, sizeof(ElfN_Ehdr), fd) == sizeof(ElfN_Ehdr));
 		shCount = header.e_shnum;
 		shOffset = header.e_shoff;
 
@@ -138,11 +137,11 @@ static void retrieveFunctions(char *file, void (*handler)(functioninfo_t *, FILE
 			{
 				ElfN_Shdr strtab;
 				fseek(fd, shOffset + section.sh_link * sizeof(ElfN_Shdr), SEEK_SET);
-				fread(&strtab, 1, sizeof(ElfN_Shdr), fd);
+				assert(fread(&strtab, 1, sizeof(ElfN_Shdr), fd) == sizeof(ElfN_Shdr));
 
 				names = malloc(strtab.sh_size);
 				fseek(fd, strtab.sh_offset, SEEK_SET);
-				fread(names, 1, strtab.sh_size, fd);
+				assert(fread(names, 1, strtab.sh_size, fd) == strtab.sh_size);
 
 				fseek(fd, section.sh_offset, SEEK_SET);
 			}
@@ -151,7 +150,7 @@ static void retrieveFunctions(char *file, void (*handler)(functioninfo_t *, FILE
 			while(count > 0)
 			{
 				ElfN_Sym sym;
-				fread(&sym, 1, sizeof(ElfN_Sym), fd);
+				assert(fread(&sym, 1, sizeof(ElfN_Sym), fd) == sizeof(ElfN_Sym));
 
 				if(sym.st_name == 0 || sym.st_size == 0)
 					; //ignore
@@ -173,6 +172,7 @@ static void retrieveFunctions(char *file, void (*handler)(functioninfo_t *, FILE
 static void initialHandler(functioninfo_t *func, FILE *fd)
 {
 	functioninfo_t *info = malloc(sizeof(functioninfo_t));
+	assert(info != NULL);
 
 	memcpy(info->digest, func->digest, 16);
 	info->name = strdup(func->name);
@@ -212,7 +212,7 @@ static void compareHandler(functioninfo_t *func, FILE *fd)
 									MAP_32BIT | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 				assert(ptr != NULL);
 
-				fread(ptr, 1, size, fd);
+				assert(fread(ptr, 1, func->size, fd) == func->size);
 				//TODO link new function
 
 				patchFunction(curr->address, ptr);
@@ -232,6 +232,7 @@ void *hotswap_worker(char *path)
 	int notify = inotify_init();
 	int watch = inotify_add_watch(notify, path, IN_CLOSE_WRITE);
 	struct inotify_event *event = malloc(sizeof(struct inotify_event) + NAME_MAX + 1);
+	assert(event != NULL);
 
 	while(true)
 	{
@@ -254,11 +255,13 @@ extern void hotswap_init() __attribute__((constructor));
 void hotswap_init()
 {
 	char *executable = getenv("HOTSWAP_EXECUTABLE");
+	assert(executable != NULL);
 
 	DIR *dp;
 	struct dirent *curr;
 
 	char *path = malloc(strlen(executable) + 256);
+	assert(path != NULL);
 	strcpy(path, executable);
 	strcpy(path, dirname(path));
 	int pathLen = strlen(path);
