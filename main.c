@@ -7,9 +7,13 @@
 
 #include <elf.h>
 #include <dlfcn.h>
-#include <sys/mman.h>
-
+#include <pthread.h>
 #include <mhash.h>
+
+#include <libgen.h>
+#include <dirent.h>
+#include <sys/mman.h>
+#include <sys/inotify.h>
 
 //TODO auto determine these
 #define ElfN_Ehdr Elf64_Ehdr
@@ -39,7 +43,7 @@ functioninfo_t *knownFunctions = NULL;
 static void patchFunction(uint8_t *func, uint8_t *newFunc)
 {
 	uint8_t *aligned = (uint8_t *)((uint64_t)func & ~0xFFF);
-	if(patchedPages[(uintptr_t)aligned / 4096])
+	if(!patchedPages[(uintptr_t)aligned / 4096])
 	{
 		memcpy(patchBuff, aligned, PAGE_SIZE);
 
@@ -169,11 +173,27 @@ static void retrieveFunctions(char *file, void (*handler)(functioninfo_t *, FILE
 static void initialHandler(functioninfo_t *func, FILE *fd)
 {
 	functioninfo_t *info = malloc(sizeof(functioninfo_t));
-	memcpy(info, func, sizeof(functioninfo_t));
 
-	info->name = strdup(info->name);
+	memcpy(info->digest, func->digest, 16);
+	info->name = strdup(func->name);
+	info->address = NULL;
+	info->size = func->size;
 	info->next = knownFunctions;
 	knownFunctions = info;
+}
+
+static void executableHandler(functioninfo_t *func, FILE *fd)
+{
+	functioninfo_t *curr = knownFunctions;
+	while(curr != NULL)
+	{
+		if(strcmp(curr->name, func->name) == 0)
+		{
+			curr->address = func->address;
+			return;
+		}
+		curr = curr->next;
+	}
 }
 
 static void compareHandler(functioninfo_t *func, FILE *fd)
@@ -185,6 +205,8 @@ static void compareHandler(functioninfo_t *func, FILE *fd)
 		{
 			if(memcmp(curr->digest, func->digest, 16) != 0)
 			{
+				assert(curr->address != NULL);
+
 				size_t size = (func->size & ~(PAGE_SIZE - 1)) + PAGE_SIZE;
 				uint8_t *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC,
 									MAP_32BIT | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -193,9 +215,7 @@ static void compareHandler(functioninfo_t *func, FILE *fd)
 				fread(ptr, 1, size, fd);
 				//TODO link new function
 
-				//for now we use dlsym later we should parse the .symtab section of the
-				//executable ourselves to ensure we also capture local functions
-				patchFunction(dlsym(NULL, curr->name), ptr);
+				patchFunction(curr->address, ptr);
 				memcpy(curr->digest, func->digest, 16);
 			}
 
@@ -206,33 +226,63 @@ static void compareHandler(functioninfo_t *func, FILE *fd)
 	}
 }
 
+void *hotswap_worker(char *path)
+{
+	int pathLen = strlen(path);
+	int notify = inotify_init();
+	int watch = inotify_add_watch(notify, path, IN_CLOSE_WRITE);
+	struct inotify_event *event = malloc(sizeof(struct inotify_event) + NAME_MAX + 1);
+
+	while(true)
+	{
+		read(notify, event, sizeof(struct inotify_event) + NAME_MAX + 1);
+		assert(event->wd == watch);
+		assert(event->mask == IN_CLOSE_WRITE);
+
+		if(event->len > 0 && strcmp(event->name + strlen(event->name) - 2, ".o") == 0)
+		{
+			path[pathLen] = '/';
+			strcpy(path + pathLen + 1, event->name);
+			retrieveFunctions(path, compareHandler);
+		}
+	}
+
+	return NULL; //doh
+}
+
+extern void hotswap_init() __attribute__((constructor));
 void hotswap_init()
 {
 	char *executable = getenv("HOTSWAP_EXECUTABLE");
-	retrieveFunctions(executable, initialHandler);
 
-	//TODO watch files in dirname(executable) on change call
-	//retrieveFunctions(<changed file>, compareHandler);
-}
+	DIR *dp;
+	struct dirent *curr;
 
-//for testing
-int main(int argc, char **argv)
-{
-	if(argc != 2)
+	char *path = malloc(strlen(executable) + 256);
+	strcpy(path, executable);
+	strcpy(path, dirname(path));
+	int pathLen = strlen(path);
+
+	dp = opendir(path);
+	assert(dp != NULL);
+
+	while(curr = readdir(dp))
 	{
-		printf("Usage: %s <file>\n", argv[0]);
-		return 1;
+		if(curr->d_type == DT_REG && strcmp(curr->d_name + strlen(curr->d_name) - 2, ".o") == 0)
+		{
+			path[pathLen] = '/';
+			strcpy(path + pathLen + 1, curr->d_name);
+			printf("reading file '%s'\n", path);
+			retrieveFunctions(path, initialHandler);
+		}
 	}
 
-	retrieveFunctions(argv[1], initialHandler);
+	closedir(dp);
+	path[pathLen] = 0;
 
-	printf("Found functions:\n");
-	functioninfo_t *curr = knownFunctions;
-	while(curr != NULL)
-	{
-		printf("    %16lX | %s\n", (uint64_t)curr->address, curr->name);
-		curr = curr->next;
-	}
+	retrieveFunctions(executable, executableHandler);
 
-	return 0;
+	pthread_t worker;
+	pthread_create(&worker, NULL, (void *)hotswap_worker, path);
+	pthread_detach(worker);
 }

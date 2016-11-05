@@ -1,3 +1,6 @@
-# ignore local test files
-/test.c
-/test.o
+#binary file
+/hotswap.so
+
+#test binary files
+/test/test.o
+/test/test
