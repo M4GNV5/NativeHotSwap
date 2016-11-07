@@ -59,7 +59,7 @@ static void patchFunction(uint8_t *func, uint8_t *newFunc)
 	*(uint32_t *)(func + 1) = newFunc - func - 5;
 }
 
-static void retrieveFunction(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
+static void retrieveSymbol(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
 	char *names, void (*handler)(symbolinfo_t *, FILE *))
 {
 	MHASH td;
@@ -102,34 +102,6 @@ static void retrieveFunction(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
 	info.next = NULL;
 
 	fseek(fd, codePos, SEEK_SET);
-	handler(&info, fd);
-
-	fseek(fd, oldPos, SEEK_SET);
-}
-
-static void retrieveObject(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
-	char *names, void (*handler)(symbolinfo_t *, FILE *))
-{
-	long oldPos = ftell(fd);
-	long valPos;
-
-	{
-		fseek(fd, shOffset + sym->st_shndx * sizeof(ElfN_Shdr), SEEK_SET);
-
-		ElfN_Shdr valInitSec;
-		assert(fread(&valInitSec, 1, sizeof(ElfN_Shdr), fd) == sizeof(ElfN_Shdr));
-
-		valPos = sym->st_value - valInitSec.sh_addr + valInitSec.sh_offset;
-	}
-
-	symbolinfo_t info;
-	memset(info.digest, 0, 16);
-	info.name = names + sym->st_name;
-	info.address = (void *)sym->st_value;
-	info.size = sym->st_size;
-	info.next = NULL;
-
-	fseek(fd, valPos, SEEK_SET);
 	handler(&info, fd);
 
 	fseek(fd, oldPos, SEEK_SET);
@@ -180,12 +152,12 @@ static void retrieveSymbols(char *file, void (*handler)(symbolinfo_t *, FILE *))
 				ElfN_Sym sym;
 				assert(fread(&sym, 1, sizeof(ElfN_Sym), fd) == sizeof(ElfN_Sym));
 
+				int type = ELFN_ST_TYPE(sym.st_info);
+
 				if(sym.st_name == 0 || sym.st_size == 0)
 					; //ignore
-				else if(ELFN_ST_TYPE(sym.st_info) == STT_FUNC)
-					retrieveFunction(shOffset, &sym, fd, names, handler);
-				else if(ELFN_ST_TYPE(sym.st_info) == STT_OBJECT)
-					retrieveObject(shOffset, &sym, fd, names, handler);
+				else if(type == STT_FUNC || type == STT_OBJECT)
+					retrieveSymbol(shOffset, &sym, fd, names, handler);
 
 				count--;
 			}
