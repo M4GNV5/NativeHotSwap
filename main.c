@@ -107,7 +107,35 @@ static void retrieveFunction(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
 	fseek(fd, oldPos, SEEK_SET);
 }
 
-static void retrieveFunctions(char *file, void (*handler)(symbolinfo_t *, FILE *))
+static void retrieveObject(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
+	char *names, void (*handler)(symbolinfo_t *, FILE *))
+{
+	long oldPos = ftell(fd);
+	long valPos;
+
+	{
+		fseek(fd, shOffset + sym->st_shndx * sizeof(ElfN_Shdr), SEEK_SET);
+
+		ElfN_Shdr valInitSec;
+		assert(fread(&valInitSec, 1, sizeof(ElfN_Shdr), fd) == sizeof(ElfN_Shdr));
+
+		valPos = sym->st_value - valInitSec.sh_addr + valInitSec.sh_offset;
+	}
+
+	symbolinfo_t info;
+	memset(info.digest, 0, 16);
+	info.name = names + sym->st_name;
+	info.address = (void *)sym->st_value;
+	info.size = sym->st_size;
+	info.next = NULL;
+
+	fseek(fd, valPos, SEEK_SET);
+	handler(&info, fd);
+
+	fseek(fd, oldPos, SEEK_SET);
+}
+
+static void retrieveSymbols(char *file, void (*handler)(symbolinfo_t *, FILE *))
 {
 	FILE *fd = fopen(file, "r");
 	assert(fd != NULL);
@@ -156,7 +184,8 @@ static void retrieveFunctions(char *file, void (*handler)(symbolinfo_t *, FILE *
 					; //ignore
 				else if(ELFN_ST_TYPE(sym.st_info) == STT_FUNC)
 					retrieveFunction(shOffset, &sym, fd, names, handler);
-				//TODO inplement STT_OBJECT
+				else if(ELFN_ST_TYPE(sym.st_info) == STT_OBJECT)
+					retrieveObject(shOffset, &sym, fd, names, handler);
 
 				count--;
 			}
@@ -244,7 +273,7 @@ void *hotswap_worker(char *path)
 		{
 			path[pathLen] = '/';
 			strcpy(path + pathLen + 1, event->name);
-			retrieveFunctions(path, compareHandler);
+			retrieveSymbols(path, compareHandler);
 		}
 	}
 
@@ -275,14 +304,14 @@ void hotswap_init()
 		{
 			path[pathLen] = '/';
 			strcpy(path + pathLen + 1, curr->d_name);
-			retrieveFunctions(path, initialHandler);
+			retrieveSymbols(path, initialHandler);
 		}
 	}
 
 	closedir(dp);
 	path[pathLen] = 0;
 
-	retrieveFunctions(executable, executableHandler);
+	retrieveSymbols(executable, executableHandler);
 
 	pthread_t worker;
 	pthread_create(&worker, NULL, (void *)hotswap_worker, path);
