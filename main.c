@@ -33,12 +33,12 @@ typedef struct functioninfo
 	void *address;
 	size_t size;
 	struct functioninfo *next;
-} functioninfo_t;
+} symbolinfo_t;
 
 bool patchedPages[512] = {false};
 static uint8_t patchBuff[PAGE_SIZE];
 
-functioninfo_t *knownFunctions = NULL;
+symbolinfo_t *knownSymbols = NULL;
 
 static void patchFunction(uint8_t *func, uint8_t *newFunc)
 {
@@ -60,7 +60,7 @@ static void patchFunction(uint8_t *func, uint8_t *newFunc)
 }
 
 static void retrieveFunction(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
-	char *names, void (*handler)(functioninfo_t *, FILE *))
+	char *names, void (*handler)(symbolinfo_t *, FILE *))
 {
 	MHASH td;
 	td = mhash_init(MHASH_MD5);
@@ -94,7 +94,7 @@ static void retrieveFunction(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
 			size -= 256;
 	}
 
-	functioninfo_t info;
+	symbolinfo_t info;
 	mhash_deinit(td, info.digest);
 	info.name = names + sym->st_name;
 	info.address = (void *)sym->st_value;
@@ -107,7 +107,7 @@ static void retrieveFunction(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
 	fseek(fd, oldPos, SEEK_SET);
 }
 
-static void retrieveFunctions(char *file, void (*handler)(functioninfo_t *, FILE *))
+static void retrieveFunctions(char *file, void (*handler)(symbolinfo_t *, FILE *))
 {
 	FILE *fd = fopen(file, "r");
 	assert(fd != NULL);
@@ -169,54 +169,54 @@ static void retrieveFunctions(char *file, void (*handler)(functioninfo_t *, FILE
 	}
 }
 
-static void initialHandler(functioninfo_t *func, FILE *fd)
+static void initialHandler(symbolinfo_t *sym, FILE *fd)
 {
-	functioninfo_t *info = malloc(sizeof(functioninfo_t));
+	symbolinfo_t *info = malloc(sizeof(symbolinfo_t));
 	assert(info != NULL);
 
-	memcpy(info->digest, func->digest, 16);
-	info->name = strdup(func->name);
+	memcpy(info->digest, sym->digest, 16);
+	info->name = strdup(sym->name);
 	info->address = NULL;
-	info->size = func->size;
-	info->next = knownFunctions;
-	knownFunctions = info;
+	info->size = sym->size;
+	info->next = knownSymbols;
+	knownSymbols = info;
 }
 
-static void executableHandler(functioninfo_t *func, FILE *fd)
+static void executableHandler(symbolinfo_t *sym, FILE *fd)
 {
-	functioninfo_t *curr = knownFunctions;
+	symbolinfo_t *curr = knownSymbols;
 	while(curr != NULL)
 	{
-		if(strcmp(curr->name, func->name) == 0)
+		if(strcmp(curr->name, sym->name) == 0)
 		{
-			curr->address = func->address;
+			curr->address = sym->address;
 			return;
 		}
 		curr = curr->next;
 	}
 }
 
-static void compareHandler(functioninfo_t *func, FILE *fd)
+static void compareHandler(symbolinfo_t *sym, FILE *fd)
 {
-	functioninfo_t *curr = knownFunctions;
+	symbolinfo_t *curr = knownSymbols;
 	while(curr != NULL)
 	{
-		if(strcmp(curr->name, func->name) == 0)
+		if(strcmp(curr->name, sym->name) == 0)
 		{
-			if(memcmp(curr->digest, func->digest, 16) != 0)
+			if(memcmp(curr->digest, sym->digest, 16) != 0)
 			{
 				assert(curr->address != NULL);
 
-				size_t size = (func->size & ~(PAGE_SIZE - 1)) + PAGE_SIZE;
+				size_t size = (sym->size & ~(PAGE_SIZE - 1)) + PAGE_SIZE;
 				uint8_t *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC,
 									MAP_32BIT | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 				assert(ptr != NULL);
 
-				assert(fread(ptr, 1, func->size, fd) == func->size);
+				assert(fread(ptr, 1, sym->size, fd) == sym->size);
 				//TODO link new function
 
 				patchFunction(curr->address, ptr);
-				memcpy(curr->digest, func->digest, 16);
+				memcpy(curr->digest, sym->digest, 16);
 			}
 
 			return;
@@ -275,7 +275,6 @@ void hotswap_init()
 		{
 			path[pathLen] = '/';
 			strcpy(path + pathLen + 1, curr->d_name);
-			printf("reading file '%s'\n", path);
 			retrieveFunctions(path, initialHandler);
 		}
 	}
