@@ -5,6 +5,7 @@
 #include <string.h>
 #include <assert.h>
 
+#include <unistd.h>
 #include <elf.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -177,24 +178,10 @@ static void initialHandler(symbolinfo_t *sym, FILE *fd)
 
 	memcpy(info->digest, sym->digest, 16);
 	info->name = strdup(sym->name);
-	info->address = NULL;
+	info->address = sym->address;;
 	info->size = sym->size;
 	info->next = knownSymbols;
 	knownSymbols = info;
-}
-
-static void executableHandler(symbolinfo_t *sym, FILE *fd)
-{
-	symbolinfo_t *curr = knownSymbols;
-	while(curr != NULL)
-	{
-		if(strcmp(curr->name, sym->name) == 0)
-		{
-			curr->address = sym->address;
-			return;
-		}
-		curr = curr->next;
-	}
 }
 
 static void compareHandler(symbolinfo_t *sym, FILE *fd)
@@ -229,11 +216,16 @@ static void compareHandler(symbolinfo_t *sym, FILE *fd)
 
 void *hotswap_worker(char *path)
 {
-	int pathLen = strlen(path);
+	assert(dirname(path) == path); //TODO - watching only the file doesnt work?
 	int notify = inotify_init();
 	int watch = inotify_add_watch(notify, path, IN_CLOSE_WRITE);
+
 	struct inotify_event *event = malloc(sizeof(struct inotify_event) + NAME_MAX + 1);
 	assert(event != NULL);
+
+	int pathLen = strlen(path);
+	char *fileName = path + pathLen + 1;
+	path[pathLen] = '/';
 
 	while(true)
 	{
@@ -241,12 +233,8 @@ void *hotswap_worker(char *path)
 		assert(event->wd == watch);
 		assert(event->mask == IN_CLOSE_WRITE);
 
-		if(event->len > 0 && strcmp(event->name + strlen(event->name) - 2, ".o") == 0)
-		{
-			path[pathLen] = '/';
-			strcpy(path + pathLen + 1, event->name);
+		if(event->len > 0 && strcmp(event->name, fileName) == 0)
 			retrieveSymbols(path, compareHandler);
-		}
 	}
 
 	return NULL; //doh
@@ -255,35 +243,11 @@ void *hotswap_worker(char *path)
 extern void hotswap_init() __attribute__((constructor));
 void hotswap_init()
 {
-	char *executable = getenv("HOTSWAP_EXECUTABLE");
-	assert(executable != NULL);
+	char *path = malloc(PATH_MAX);
+	assert(path != 0);
+	assert(readlink("/proc/self/exe", path, PATH_MAX) != -1);
 
-	DIR *dp;
-	struct dirent *curr;
-
-	char *path = malloc(strlen(executable) + 256);
-	assert(path != NULL);
-	strcpy(path, executable);
-	strcpy(path, dirname(path));
-	int pathLen = strlen(path);
-
-	dp = opendir(path);
-	assert(dp != NULL);
-
-	while(curr = readdir(dp))
-	{
-		if(curr->d_type == DT_REG && strcmp(curr->d_name + strlen(curr->d_name) - 2, ".o") == 0)
-		{
-			path[pathLen] = '/';
-			strcpy(path + pathLen + 1, curr->d_name);
-			retrieveSymbols(path, initialHandler);
-		}
-	}
-
-	closedir(dp);
-	path[pathLen] = 0;
-
-	retrieveSymbols(executable, executableHandler);
+	retrieveSymbols(path, initialHandler);
 
 	pthread_t worker;
 	pthread_create(&worker, NULL, (void *)hotswap_worker, path);
