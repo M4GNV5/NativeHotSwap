@@ -23,23 +23,40 @@
 #define ElfN_Rel Elf64_Rel
 #define ElfN_Rela Elf64_Rela
 #define ELFN_ST_TYPE(val) ELF64_ST_TYPE(val)
+#define ELFN_R_TYPE(val) ELF64_R_TYPE(val)
 
 //TODO use getpagesize() ?
 #define PAGE_SIZE 4096
 
-typedef struct functioninfo
+//TODO is there a header file that already defines these?
+#define R_X86_64_64 1
+#define R_X86_64_PC32 2
+#define R_X86_64_32 10
+#define R_X86_64_32S 11
+
+typedef struct symbolinfo
 {
 	unsigned char digest[16];
 	char *name;
 	void *address;
 	size_t size;
-	struct functioninfo *next;
+	struct symbolinfo *next;
 } symbolinfo_t;
+
+typedef struct relinfo
+{
+	uintptr_t address;
+	uint8_t type; //see System V amd64 ABI (page 70)
+	uint8_t size : 4;
+	uint8_t isRelative : 1;
+	struct relinfo *next;
+} relinfo_t;
 
 bool patchedPages[512] = {false};
 static uint8_t patchBuff[PAGE_SIZE];
 
 symbolinfo_t *knownSymbols = NULL;
+relinfo_t *knownRels = NULL;
 
 static void patchFunction(uint8_t *func, uint8_t *newFunc)
 {
@@ -108,67 +125,124 @@ static void retrieveSymbol(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
 	fseek(fd, oldPos, SEEK_SET);
 }
 
-static void retrieveSymbols(char *file, void (*handler)(symbolinfo_t *, FILE *))
+static void retrieveRels(int count, bool hasAddend, FILE *fd)
+{
+	while(count > 0)
+	{
+		ElfN_Rela rel;
+		int size = hasAddend ? sizeof(ElfN_Rela) : sizeof(ElfN_Rel);
+		assert(fread(&rel, 1, size, fd) == size);
+
+
+
+		relinfo_t *info = malloc(sizeof(relinfo_t));
+		assert(info != NULL);
+		info->type = ELFN_R_TYPE(rel.r_info);
+		info->address = rel.r_offset;
+
+		switch(info->type)
+		{
+			case R_X86_64_64:
+				info->size = 8;
+				info->isRelative = false;
+				break;
+			case R_X86_64_32:
+			case R_X86_64_32S:
+				info->size = 4;
+				info->isRelative = false;
+				break;
+			case R_X86_64_PC32:
+				info->size = 4;
+				info->isRelative = true;
+				break;
+			default:
+				//keep them but assert(0) if they appear in a function that needs to be relocated
+				info->size = 0;
+				info->type = (uint8_t)-1;
+		}
+
+		info->next = knownRels;
+		knownRels = info;
+
+		printf("parsed rel at %p | type %d | size %d\n", info->address, info->type, info->size);
+
+		count--;
+	}
+}
+
+static void retrieveSymbols(char *file, bool rememberRels, void (*handler)(symbolinfo_t *, FILE *))
 {
 	FILE *fd = fopen(file, "r");
 	assert(fd != NULL);
 
-	uint16_t shCount;
+	uint16_t count;
 	uintptr_t shOffset;
 
 	{
 		ElfN_Ehdr header;
 		assert(fread(&header, 1, sizeof(ElfN_Ehdr), fd) == sizeof(ElfN_Ehdr));
-		shCount = header.e_shnum;
+		count = header.e_shnum;
 		shOffset = header.e_shoff;
 
 		fseek(fd, shOffset, SEEK_SET);
 	}
 
-	while(shCount > 0)
+	ElfN_Shdr section;
+	long symPos = -1;
+
+	while(count > 0)
 	{
-		ElfN_Shdr section;
 		assert(fread(&section, 1, sizeof(ElfN_Shdr), fd) == sizeof(ElfN_Shdr));
 
 		if(section.sh_type == SHT_SYMTAB)
 		{
-			char *names;
-			long sectionPos = ftell(fd);
+			symPos = ftell(fd) - sizeof(ElfN_Shdr);
+		}
+		else if(rememberRels && (section.sh_type == SHT_RELA || section.sh_type == SHT_REL))
+		{
+			int count = section.sh_size / (section.sh_type == SHT_RELA ? sizeof(ElfN_Rela) : sizeof(ElfN_Rel));
+			long oldPos = ftell(fd);
 
-			{
-				ElfN_Shdr strtab;
-				fseek(fd, shOffset + section.sh_link * sizeof(ElfN_Shdr), SEEK_SET);
-				assert(fread(&strtab, 1, sizeof(ElfN_Shdr), fd) == sizeof(ElfN_Shdr));
-
-				names = malloc(strtab.sh_size);
-				fseek(fd, strtab.sh_offset, SEEK_SET);
-				assert(fread(names, 1, strtab.sh_size, fd) == strtab.sh_size);
-
-				fseek(fd, section.sh_offset, SEEK_SET);
-			}
-
-			uint16_t count = section.sh_size / sizeof(ElfN_Sym);
-			while(count > 0)
-			{
-				ElfN_Sym sym;
-				assert(fread(&sym, 1, sizeof(ElfN_Sym), fd) == sizeof(ElfN_Sym));
-
-				int type = ELFN_ST_TYPE(sym.st_info);
-
-				if(sym.st_name == 0 || sym.st_size == 0)
-					; //ignore
-				else if(type == STT_FUNC || type == STT_OBJECT)
-					retrieveSymbol(shOffset, &sym, fd, names, handler);
-
-				count--;
-			}
-
-			free(names);
-			fseek(fd, sectionPos, SEEK_SET);
+			fseek(fd, section.sh_offset, SEEK_SET);
+			retrieveRels(count, section.sh_type == SHT_RELA, fd);
+			fseek(fd, oldPos, SEEK_SET);
 		}
 
-		shCount--;
+		count--;
 	}
+
+	char *names;
+
+	assert(symPos >= 0);
+	fseek(fd, symPos, SEEK_SET);
+	assert(fread(&section, 1, sizeof(ElfN_Shdr), fd) == sizeof(ElfN_Shdr));
+
+	{
+		ElfN_Shdr strtab;
+		fseek(fd, shOffset + section.sh_link * sizeof(ElfN_Shdr), SEEK_SET);
+		assert(fread(&strtab, 1, sizeof(ElfN_Shdr), fd) == sizeof(ElfN_Shdr));
+
+		names = malloc(strtab.sh_size);
+		fseek(fd, strtab.sh_offset, SEEK_SET);
+		assert(fread(names, 1, strtab.sh_size, fd) == strtab.sh_size);
+	}
+
+	fseek(fd, section.sh_offset, SEEK_SET);
+	count = section.sh_size / sizeof(ElfN_Sym);
+	while(count > 0)
+	{
+		ElfN_Sym sym;
+		assert(fread(&sym, 1, sizeof(ElfN_Sym), fd) == sizeof(ElfN_Sym));
+
+		int type = ELFN_ST_TYPE(sym.st_info);
+		if(sym.st_name != 0 && sym.st_size != 0 && (type == STT_FUNC || type == STT_OBJECT))
+			retrieveSymbol(shOffset, &sym, fd, names, handler);
+
+		count--;
+	}
+
+	free(names);
+	fclose(fd);
 }
 
 static void initialHandler(symbolinfo_t *sym, FILE *fd)
@@ -234,7 +308,7 @@ void *hotswap_worker(char *path)
 		assert(event->mask == IN_CLOSE_WRITE);
 
 		if(event->len > 0 && strcmp(event->name, fileName) == 0)
-			retrieveSymbols(path, compareHandler);
+			retrieveSymbols(path, false, compareHandler);
 	}
 
 	return NULL; //doh
@@ -247,7 +321,7 @@ void hotswap_init()
 	assert(path != 0);
 	assert(readlink("/proc/self/exe", path, PATH_MAX) != -1);
 
-	retrieveSymbols(path, initialHandler);
+	retrieveSymbols(path, true, initialHandler);
 
 	pthread_t worker;
 	pthread_create(&worker, NULL, (void *)hotswap_worker, path);
