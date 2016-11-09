@@ -98,19 +98,35 @@ static void retrieveSymbol(uintptr_t shOffset, ElfN_Sym *sym, FILE *fd,
 
 	fseek(fd, codePos, SEEK_SET);
 
-	char buff[128];
-	uint32_t size = sym->st_size;
-	while(size > 0)
-	{
-		int curr = size % 129;
-		assert(fread(buff, 1, curr, fd) == curr);
-		mhash(td, buff, curr);
+	uint8_t *buff = malloc(sym->st_size);
+	assert(fread(buff, 1, sym->st_size, fd) == sym->st_size);
 
-		if(size < 256)
-			size = 0;
-		else
-			size -= 256;
+	relinfo_t *curr = knownRels;
+	while(curr != NULL)
+	{
+		if(curr->address > sym->st_value
+			&& curr->address < sym->st_value + sym->st_size)
+		{
+			switch(curr->size)
+			{
+				case 1:
+					*(uint8_t *)(curr->address - sym->st_value + buff) = 0;
+					break;
+				case 2:
+					*(uint16_t *)(curr->address - sym->st_value + buff) = 0;
+					break;
+				case 4:
+					*(uint32_t *)(curr->address - sym->st_value + buff) = 0;
+					break;
+				case 8:
+					*(uint64_t *)(curr->address - sym->st_value + buff) = 0;
+					break;
+			}
+		}
+		curr = curr->next;
 	}
+
+	mhash(td, buff, sym->st_size);
 
 	symbolinfo_t info;
 	mhash_deinit(td, info.digest);
