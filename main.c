@@ -180,8 +180,6 @@ static void retrieveRels(int count, bool hasAddend, FILE *fd)
 		info->next = knownRels;
 		knownRels = info;
 
-		printf("parsed rel at %p | type %d | size %d\n", info->address, info->type, info->size);
-
 		count--;
 	}
 }
